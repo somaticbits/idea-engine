@@ -1,0 +1,11 @@
+.git
+.env*
+!.env.example
+secrets
+data
+node_modules
+dist
+public
+*.db*
+.opencode
+.impeccable
