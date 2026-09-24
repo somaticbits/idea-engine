@@ -1,0 +1,15 @@
+node_modules/
+dist/
+public/
+.env*
+!.env.example
+secrets/
+data/
+*.db
+*.db-*
+.DS_Store
+.opencode/skills/impeccable/scripts/bin/
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/config.local.json
+.openchamber/screenshots/

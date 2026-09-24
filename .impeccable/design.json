@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-24T08:34:08Z",
+  "title": "Design System: Idea Engine",
+  "extensions": {
+    "colorMeta": {
+      "copper": { "role": "primary", "displayName": "Burnished Copper", "canonical": "#a14d2e", "tonalRamp": ["#32170f", "#542618", "#773822", "#a14d2e", "#b66b4f", "#d49379", "#e9bdab", "#f8e9df"] },
+      "pinned": { "role": "secondary", "displayName": "Oxidized Green", "canonical": "#397362", "tonalRamp": ["#102a23", "#1b4036", "#295749", "#397362", "#579180", "#84b2a1", "#bad6c9", "#e5f0e9"] },
+      "ground": { "role": "neutral", "displayName": "Cool Studio Field", "canonical": "#dfe9e5", "tonalRamp": ["#20332e", "#3b5049", "#61786f", "#8ea99e", "#b5ccc2", "#d0dfd8", "#dfe9e5", "#f3f8f4"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Crafted Title", "purpose": "Trip and screen titles; section headings use smaller sizes of the same face." },
+      "body": { "displayName": "Legible Copy", "purpose": "Branch names, descriptions, and controls." }
+    },
+    "shadows": [
+      { "name": "weight", "value": "0 5px 10px rgba(18,41,43,.16)", "purpose": "A suspended enamel disc above the map plane." },
+      { "name": "dialog", "value": "0 24px 62px #0e282852", "purpose": "One active modal sheet above the workbench." }
+    ],
+    "motion": [
+      { "name": "selection", "value": "fill 200ms ease, stroke 200ms ease", "purpose": "Weight selection only; disabled under reduced motion." }
+    ],
+    "breakpoints": [
+      { "name": "workbench-tight", "value": "1000px" },
+      { "name": "single-column", "value": "750px" }
+    ]
+  },
+  "components": [
+    { "name": "Primary Button", "kind": "button", "refersTo": "button-primary", "description": "One paid or forward action at a time.", "html": "<button class=\"ds-primary\">Explore this ↗</button>", "css": ".ds-primary{background:#a14d2e;color:#fff9f4;border:0;border-radius:7px;padding:12px 17px;font:700 16px 'Atkinson Hyperlegible',sans-serif}.ds-primary:hover{background:#773822}.ds-primary:focus-visible{outline:3px solid #173436;outline-offset:3px}" },
+    { "name": "Secondary Button", "kind": "button", "refersTo": "button-primary", "description": "Pinning and secondary controls.", "html": "<button class=\"ds-secondary\">Pin idea</button>", "css": ".ds-secondary{background:#d6e4de;color:#153b39;border:1px solid #b7cbc2;border-radius:7px;padding:12px 17px;font:700 16px 'Atkinson Hyperlegible',sans-serif}.ds-secondary:hover{background:#c6d9d0}.ds-secondary:focus-visible{outline:3px solid #9b4b2c;outline-offset:3px}" },
+    { "name": "Text Input", "kind": "input", "description": "A seed or settings field on the cool light plane.", "html": "<input class=\"ds-input\" aria-label=\"Starting point\" placeholder=\"A doorbell. A tide.\" />", "css": ".ds-input{background:#f4f7f1;color:#173436;border:1px solid #90aca4;border-radius:7px;padding:12px 14px;font:400 16px 'Atkinson Hyperlegible',sans-serif}.ds-input:focus-visible{outline:3px solid #9b4b2c;outline-offset:3px}" },
+    { "name": "Branch Choice", "kind": "custom", "refersTo": "branch-list", "description": "A numbered, named option tied to a weight in the mobile.", "html": "<button class=\"ds-branch\"><span>01</span> A nearby association</button>", "css": ".ds-branch{display:flex;gap:15px;align-items:center;width:100%;min-height:51px;background:#eef4ef;color:#173436;border:0;border-top:1px solid #cbdad2;padding:7px 8px;text-align:left;font:700 16px 'Atkinson Hyperlegible',sans-serif}.ds-branch span{color:#758d83}.ds-branch:hover,.ds-branch:focus-visible{background:#d7e4db}" },
+    { "name": "Workspace Navigation", "kind": "nav", "description": "Quiet global navigation with explicit names.", "html": "<nav class=\"ds-nav\"><button>New trip</button><button>Trips</button></nav>", "css": ".ds-nav{display:flex;gap:28px;align-items:center;background:#e9f0eb;padding:16px}.ds-nav button{border:0;background:none;color:#173436;text-decoration:underline;text-underline-offset:5px;font:700 16px 'Atkinson Hyperlegible',sans-serif}.ds-nav button:hover{color:#773822}.ds-nav button:focus-visible{outline:3px solid #9b4b2c;outline-offset:3px}" }
+  ],
+  "narrative": {
+    "northStar": "The Kinetic Mobile",
+    "overview": "The interface behaves like a small suspended work of art: one fixed pivot, a handful of branches, and a change of attention rather than a wholesale rearrangement. A pale, cool studio wall lets the actual association pattern have the stage. The structural strokes, selected enamel weight, and legible side catalog are part of the same apparatus. The system belongs to a creative workbench, with expressive shape in the map and straightforward task controls beside it.",
+    "keyCharacteristics": ["Stable, numbered physical weights paired with a named choice list.", "Deep carbon structure, cool pale field, and a rare copper signal for focus.", "Self-hosted, expressive display lettering and highly legible control copy."],
+    "rules": [
+      { "name": "The Single Signal Rule", "body": "Reserve copper for the user's chosen idea and the one next action; do not scatter it across unrelated chrome.", "section": "colors" },
+      { "name": "The Separate Names Rule", "body": "Put candidate names in the catalog and inspector, not on the wires or the weights.", "section": "typography" }
+    ],
+    "dos": ["Do keep the selected path in view and attach the next action to its selected node.", "Do render model-written names as plain text in the catalog and the concept card.", "Do keep low-motion and keyboard paths equivalent to pointer input."],
+    "donts": ["Don't run a new force layout when selection changes.", "Don't repeat full node labels across the graph and a second dense list.", "Don't treat a full-trip dashboard as the first step of exploration."]
+  }
+}

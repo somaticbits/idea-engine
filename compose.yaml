@@ -1,0 +1,19 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: production
+      DB_PATH: /data/idea.db
+      OPENROUTER_API_KEY_FILE: ${OPENROUTER_API_KEY_FILE:-}
+    volumes:
+      - data:/data
+    restart: unless-stopped
+volumes:
+  data:
