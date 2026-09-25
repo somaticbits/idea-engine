@@ -22,7 +22,7 @@ test('Dreamer → Jev → card uses fixed model calls and records provider cost'
       ]));
       return Response.json({ answers, usage: { cost: .00003 } });
     }
-    return Response.json({ choices: [{ message: { content: requests.length === 1 ? '1. underground knock\n2. paper heartbeat' : JSON.stringify({ pitch: 'A tactile message', chain: ['doorbell', 'underground knock'], stack: 'ESP32', prototype: 'Blink on a knock', wildcard: 'A printer' }) } }], usage: { cost: .00014 } });
+    return Response.json({ choices: [{ message: { content: requests.length === 1 ? '1. underground knock\n2. paper heartbeat' : JSON.stringify({ pitch: 'A tactile message', stack: 'ESP32', prototype: 'Blink on a knock', wildcard: 'A printer' }) } }], usage: { cost: .00014 } });
   };
   try {
     const candidates = await dream('fake-key', 'doorbell', ['doorbell'], [], 'medium', 'fixture-operation');
@@ -33,6 +33,9 @@ test('Dreamer → Jev → card uses fixed model calls and records provider cost'
     assert.equal(requests.length, 3);
     assert.equal(requests[0].body.provider.zdr, true);
     assert.equal(requests[0].body.provider.data_collection, 'deny');
+    assert.deepEqual(requests[0].body.provider.order, ['together', 'coreweave/fp8', 'novita/fp8']);
+    assert.deepEqual(requests[2].body.provider, requests[0].body.provider);
+    assert.match(requests[2].body.messages[1].content, /do not repeat it in the output/i);
     assert.equal(requests[1].body.model, 'jev-1.13');
     assert.deepEqual(deadlines, [30_000, 30_000, 30_000]);
     assert.equal((db.prepare('SELECT SUM(cost) AS total FROM model_calls').get() as { total: number }).total, .00031);
@@ -53,5 +56,43 @@ test('timed-out chat calls preserve spend reservations and explain manual retry'
     assert.equal(call.status, 'uncertain');
     assert.equal(call.cost, null);
     assert.ok(call.reservation > 0);
+  } finally { globalThis.fetch = original; }
+});
+
+test('Narrator retries invalid concept output up to three total calls', async () => {
+  const { narrate } = await import('../src/pipeline/narrate.js');
+  const { db } = await import('../src/db.js');
+  const original = globalThis.fetch;
+  const requests: Array<{ body: any }> = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push({ body });
+    const content = requests.length < 3
+      ? JSON.stringify({ pitch: 'A concept without its required fields' })
+      : JSON.stringify({ pitch: 'A tactile doorbell', stack: 'ESP32', prototype: 'Blink on a knock', wildcard: 'A paper heartbeat' });
+    return Response.json({ choices: [{ message: { content } }], usage: { cost: .0001 } });
+  };
+  try {
+    const path = ['doorbell', 'paper heartbeat'];
+    const card = await narrate('fake-key', path, [], 'narrator-retry-test');
+    assert.equal(requests.length, 3);
+    assert.match(requests[1].body.messages[1].content, /previous JSON did not satisfy the required fields/i);
+    assert.match(requests[2].body.messages[1].content, /previous JSON did not satisfy the required fields/i);
+    assert.deepEqual(card.chain, path);
+    assert.equal(db.prepare("SELECT COUNT(*) AS total FROM model_calls WHERE operation_id='narrator-retry-test'").get()?.total, 3);
+  } finally { globalThis.fetch = original; }
+});
+
+test('Narrator reports a clear failure after three invalid concepts', async () => {
+  const { narrate } = await import('../src/pipeline/narrate.js');
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ choices: [{ message: { content: '{"pitch":"incomplete"}' } }], usage: { cost: .0001 } });
+  };
+  try {
+    await assert.rejects(narrate('fake-key', ['doorbell'], [], 'narrator-failed-retry-test'), /valid card after 3 attempts/);
+    assert.equal(calls, 3);
   } finally { globalThis.fetch = original; }
 });

@@ -52,7 +52,12 @@ async function post(key: string, path: string, body: object, role: string, opera
 }
 
 export function callChat(key: string, body: object, role: string, operationId?: string) {
-  return post(key, 'chat/completions', { ...body, provider: { data_collection: 'deny', zdr: true } }, role, operationId);
+  // Prefer the consistently quick ZDR-compatible endpoints from recorded calls;
+  // OpenRouter may still fall back to another compliant provider if these fail.
+  return post(key, 'chat/completions', { ...body, provider: {
+    data_collection: 'deny', zdr: true,
+    order: ['together', 'coreweave/fp8', 'novita/fp8'],
+  } }, role, operationId);
 }
 export function callJev(key: string, body: object, role = 'jev', operationId?: string) {
   // System One privacy-routing support requires live verification before public release.

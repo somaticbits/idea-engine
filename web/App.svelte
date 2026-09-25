@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { ArrowUpRight, Bookmark, Check, ChevronDown, Copy, Maximize2, Minimize2, Minus, Moon, Plus, Settings, Sun } from '@lucide/svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
 
   type Node = { id: string; trip_id: string; parent_id: string | null; label: string; expanded: number; pinned: number; x: number; y: number };
@@ -23,6 +24,8 @@
   let cards = $state<Card[]>([]);
   let route = $state<Route>({ nodes: [], cursor: 0 });
   let showFullPath = $state(false);
+  let canvasFocused = $state(false);
+  let nearbyCollapsed = $state(false);
   let focusId = $state('');
   let selectedId = $state('');
   let busy = $state('');
@@ -31,10 +34,13 @@
   let loadingNoteTimer: ReturnType<typeof setTimeout> | undefined;
   let loadingNoteCycle: ReturnType<typeof setInterval> | undefined;
   let failedExpansionId = $state('');
-  let queuedExpansionId = '';
+  let queuedExpansionId = $state('');
   let routeSaveVersion = 0;
   let routeSaveChain: Promise<unknown> = Promise.resolve();
   let error = $state('');
+  let dialogFeedback = $state('');
+  let dialogBusy = $state('');
+  let settingsSaved = $state<'kit' | 'limits' | ''>('');
   let uncertain = $state<{ type: Action; id: string } | null>(null);
   let theme = $state<Theme>('light');
   let pinningIds = $state(new Set<string>());
@@ -43,9 +49,16 @@
   let pinCap = $state(30);
   let hourlyLimit = $state(2);
   let exportText = $state('');
-  let historyDialog: HTMLDialogElement;
-  let settingsDialog: HTMLDialogElement;
-  let cardDialog: HTMLDialogElement;
+  let exportFormat = $state<'markdown' | 'agent' | null>(null);
+  let copyStatus = $state('');
+  let exportResult = $state<HTMLTextAreaElement>();
+  let exportPreviewHeading = $state<HTMLHeadingElement>();
+  let exportTrigger: HTMLButtonElement | null = null;
+  let historyDialog = $state<HTMLDialogElement>();
+  let savedDialog = $state<HTMLDialogElement>();
+  let settingsDialog = $state<HTMLDialogElement>();
+  let cardDialog = $state<HTMLDialogElement>();
+  let pathRail = $state<HTMLElement>();
 
   const root = $derived(nodes.find(node => !node.parent_id) ?? null);
   const focus = $derived(nodes.find(node => node.id === focusId) ?? root);
@@ -66,16 +79,19 @@
     return result;
   }
 
-  async function perform(label: string, action: () => Promise<void>, operation?: { type: Action; id: string }): Promise<boolean> {
+  async function perform(label: string, action: () => Promise<void>, operation?: { type: Action; id: string }, dialog?: 'settings' | 'card'): Promise<boolean> {
     busy = label;
     error = '';
+    dialogFeedback = '';
+    if (dialog) dialogBusy = label;
     uncertain = null;
     try { await action(); return true; }
     catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Something went wrong. Try again.';
-      if (operation && /uncertain outcome|aborted due to timeout|timed out|may have been billed/i.test(error)) uncertain = operation;
+      const message = cause instanceof Error ? cause.message : 'Something went wrong. Try again.';
+      if (dialog) dialogFeedback = message; else error = message;
+      if (operation && /uncertain outcome|aborted due to timeout|timed out|may have been billed/i.test(message)) uncertain = operation;
       return false;
-    } finally { busy = ''; }
+    } finally { busy = ''; dialogBusy = ''; }
   }
 
   async function refresh() {
@@ -161,7 +177,7 @@
     return result;
   }
 
-  function visitNode(id: string, force = false) {
+  function visitNode(id: string, force = false, allowGeneration = true) {
     const target = nodes.find(node => node.id === id);
     if (!target || !current) return;
     if (id === focusId && !force) return;
@@ -180,7 +196,7 @@
     failedExpansionId = '';
     exportText = '';
     persistRoute();
-    if (!target.expanded) {
+    if (!target.expanded && allowGeneration) {
       if (loadingId) queuedExpansionId = id;
       else void expand(id);
     }
@@ -306,16 +322,17 @@
     uncertain = null;
     try {
       const card = await api<Card>(`/api/nodes/${id}/pin`, 'POST', { route: ancestryFor(id) });
+      if (current?.id !== tripId) return;
       cards = [...cards.filter(saved => saved.node_id !== id), card];
       nodes = nodes.map(node => node.id === id ? { ...node, pinned: 1 } : node);
       selectedId = id;
       exportText = '';
-      if (current?.id === tripId) {
-        const settings = await api<{ spend_today: number }>('/api/settings');
-        spent = settings.spend_today;
-      }
+      const settings = await api<{ spend_today: number }>('/api/settings');
+      if (current?.id !== tripId) return;
+      spent = settings.spend_today;
       cardDialog?.showModal();
     } catch (cause) {
+      if (current?.id !== tripId) return;
       error = cause instanceof Error ? cause.message : 'Could not write the concept card.';
       if (/uncertain outcome|aborted due to timeout|timed out|may have been billed/i.test(error)) uncertain = { type: 'pin', id };
     } finally {
@@ -325,41 +342,74 @@
     }
   }
 
-  async function retryUncertain() {
+  async function retryUncertain(dialog?: 'settings' | 'card') {
     if (!uncertain || !confirm('The previous model call may already have been billed. Check OpenRouter activity before another paid call. Retry now?')) return;
     const action = uncertain;
     await perform('Preparing the retry…', async () => {
       await api(`/api/operations/${action.type}/${action.id}/retry`, 'POST', { confirmUncertain: true });
       if (action.type === 'pin') await pin(action.id); else await expand(action.id);
-    });
+    }, undefined, dialog);
   }
 
-  async function preview(format: 'markdown' | 'agent') {
+  async function preview(format: 'markdown' | 'agent', trigger: HTMLButtonElement) {
     if (!selectedCard) return;
+    if (exportFormat === format && exportText) {
+      exportTrigger = trigger;
+      await closeExportPreview();
+      return;
+    }
+    exportTrigger = trigger;
+    copyStatus = '';
     await perform('Preparing export…', async () => {
       const response = await fetch(`/api/cards/${selectedCard.id}/export?format=${format}`);
       if (!response.ok) throw new Error('Export is unavailable.');
       exportText = await response.text();
-    });
+      exportFormat = format;
+      await tick();
+      exportResult?.scrollIntoView({ block: 'nearest', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+      exportPreviewHeading?.focus();
+    }, undefined, 'card');
+  }
+
+  async function closeExportPreview() {
+    exportText = '';
+    exportFormat = null;
+    copyStatus = '';
+    await tick();
+    exportTrigger?.focus();
+  }
+
+  async function copyExport() {
+    if (!exportText) return;
+    try {
+      await navigator.clipboard.writeText(exportText);
+      copyStatus = 'Copied to clipboard';
+    } catch {
+      copyStatus = 'Copy was blocked. Select the text below and copy it manually.';
+      exportResult?.focus();
+      exportResult?.select();
+    }
   }
 
   async function connect() {
-    await perform('Checking chat and Jev…', async () => { setup = await api('/api/setup/key', 'PUT', { key }); key = ''; });
+    await perform('Checking your provider connection…', async () => { setup = await api('/api/setup/key', 'PUT', { key }); key = ''; }, undefined, settingsDialog?.open ? 'settings' : undefined);
   }
 
   async function saveKit() {
-    await perform('Saving your kit…', async () => {
+    settingsSaved = '';
+    if (await perform('Saving your kit…', async () => {
       await api('/api/kit', 'PUT', kitText.split(',').map(item => item.trim()).filter(Boolean));
-    });
+    }, undefined, 'settings')) settingsSaved = 'kit';
   }
 
   async function saveLimits() {
-    await perform('Saving limits…', async () => {
+    settingsSaved = '';
+    if (await perform('Saving limits…', async () => {
       await api('/api/settings', 'PUT', {
         daily_expansion_cap: Number(expansionCap), daily_pin_cap: Number(pinCap), hourly_spend_limit: Number(hourlyLimit),
       });
       await refresh();
-    });
+    }, undefined, 'settings')) settingsSaved = 'limits';
   }
 
   async function deleteData() {
@@ -369,8 +419,27 @@
       startNew();
       await refresh();
       settingsDialog?.close();
-    });
+    }, undefined, 'settings');
   }
+
+  function openSavedConcept(card: Card) {
+    selectedId = card.node_id;
+    exportText = '';
+    exportFormat = null;
+    dialogFeedback = '';
+    cardDialog?.showModal();
+  }
+
+  function showSavedOnMap(card: Card) {
+    savedDialog?.close();
+    visitNode(card.node_id, false, false);
+  }
+
+  $effect(() => {
+    focusId;
+    nearbyCollapsed = false;
+    void tick().then(() => pathRail?.querySelector('.here')?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }));
+  });
 
 </script>
 
@@ -379,7 +448,7 @@
   <meta name="description" content="Explore associations, follow promising branches and pin ideas worth building." />
 </svelte:head>
 
-<header class="topbar">
+<header class="topbar" class:canvas-focus-hidden={canvasFocused} class:in-trip={!!current}>
   <button class="wordmark" type="button" onclick={startNew} aria-label="Idea Engine, new trip">
     <svg viewBox="0 0 36 36" aria-hidden="true"><path d="M18 4v10m0 8v10M4 18h10m8 0h10M8 8l7 7m6 6 7 7M28 8l-7 7m-6 6-7 7"/><circle cx="18" cy="18" r="3"/></svg>
     <span>idea engine</span>
@@ -390,19 +459,19 @@
       {#if current}<button type="button" class="text-button" onclick={startNew}>New trip</button>{/if}
       <button type="button" class="text-button" onclick={() => historyDialog?.showModal()}>Trips <span class="nav-count">{trips.length}</span></button>
       <button type="button" class="settings-trigger" onclick={() => settingsDialog?.showModal()} aria-label="Open settings">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.4a2.4 2.4 0 0 1 4.6 0l.3 1.2a7.8 7.8 0 0 1 1.5.9l1.2-.5a2.4 2.4 0 0 1 3.3 2.3l-.1 1.3c.4.5.6 1 .8 1.7l1 .8a2.4 2.4 0 0 1-1.2 4.4l-1.3.2a7.8 7.8 0 0 1-.9 1.5l.2 1.3a2.4 2.4 0 0 1-3.1 2.6l-1.2-.4a7.8 7.8 0 0 1-1.7.7l-.7 1.1a2.4 2.4 0 0 1-4.5-.8l-.3-1.3a7.8 7.8 0 0 1-1.5-1l-1.2.3a2.4 2.4 0 0 1-2.9-2.8l.3-1.3a7.8 7.8 0 0 1-.8-1.6l-1.1-.7a2.4 2.4 0 0 1 .5-4.5l1.3-.4a7.8 7.8 0 0 1 1-1.5l-.4-1.2a2.4 2.4 0 0 1 2.6-3.1l1.3.2a7.8 7.8 0 0 1 1.6-.8l.7-1.1Z"/><circle cx="12" cy="12" r="3"/></svg>
+        <Settings size={22} strokeWidth={1.8} aria-hidden="true" />
       </button>
     </nav>
     {/if}
     <button type="button" class="theme-trigger" onclick={toggleTheme} aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
-      {#if theme === 'dark'}<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
-      {:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5 8.5 8.5 0 1 0 20.5 15.5Z"/></svg>{/if}
+      {#if theme === 'dark'}<Sun size={22} strokeWidth={1.8} aria-hidden="true" />
+      {:else}<Moon size={22} strokeWidth={1.8} aria-hidden="true" />{/if}
     </button>
   </div>
 </header>
 
-{#if error}<div role="alert" class="notice error"><span>{error}</span>{#if uncertain}<button type="button" class="notice-action" onclick={retryUncertain}>Review & retry</button>{/if}<button type="button" class="notice-close" onclick={() => { error = ''; uncertain = null; }} aria-label="Dismiss error">×</button></div>{/if}
-{#if busy && !loadingId}<div role="status" class="notice progress"><span class="activity" aria-hidden="true"></span>{busy}</div>{/if}
+{#if error && !settingsDialog?.open && !cardDialog?.open}<div role="alert" class="notice error"><span>{error}</span>{#if uncertain}<button type="button" class="notice-action" onclick={() => void retryUncertain()}>Review & retry</button>{/if}<button type="button" class="notice-close" onclick={() => { error = ''; uncertain = null; }} aria-label="Dismiss error">×</button></div>{/if}
+{#if busy && !dialogBusy && (!loadingId || loadingId !== focusId)}<div role="status" class="notice progress"><span class="activity" aria-hidden="true"></span>{queuedExpansionId && queuedExpansionId === focusId ? 'This idea is queued; it will use your model budget.' : busy}</div>{/if}
 
 {#if setup.status === 'none'}
   <main class="home setup-home">
@@ -431,17 +500,17 @@
           <button type="button" class:active={dose === 'medium'} aria-pressed={dose === 'medium'} onclick={() => dose = 'medium'}>Open</button>
           <button type="button" class:active={dose === 'high'} aria-pressed={dose === 'high'} onclick={() => dose = 'high'}>Far</button>
         </div></fieldset>
-        <div class="form-tail"><span>{kitText ? `Your kit is in play · ${kitText.split(',').filter(Boolean).length} items` : 'A kit is optional — add one in settings'}</span><button type="submit" class="primary" disabled={!!busy}>Begin exploring <span aria-hidden="true">↗</span></button></div>
+        <div class="form-tail"><div class="form-tail-context"><span>{kitText ? `Your kit is in play · ${kitText.split(',').filter(Boolean).length} items` : 'A kit is optional — add one in settings'}</span><small>Starting generates ideas using your model budget · {expansionCap} expansions/day · ${hourlyLimit.toFixed(2)}/hour limit</small></div><button type="submit" class="primary" disabled={!!busy}>Begin exploring <ArrowUpRight size={18} strokeWidth={2} aria-hidden="true" /></button></div>
       </form>
       {#if trips.length}<button type="button" class="resume-link" onclick={() => historyDialog?.showModal()}>Or return to a previous trip <span aria-hidden="true">→</span></button>{/if}
     </div>
     <div class="home-object" aria-hidden="true"><svg viewBox="0 0 480 540"><path d="M238 0v95M77 154h322M238 95v59M94 154v132M383 154v225M23 286h190M89 286v150M203 286v116"/><circle cx="238" cy="154" r="7"/><circle cx="94" cy="286" r="22"/><circle cx="382" cy="380" r="35"/><circle cx="89" cy="436" r="28"/><circle cx="203" cy="402" r="16"/></svg><span class="object-caption">An idea can move in more than one direction.</span></div>
   </main>
 {:else if focus && selected}
-  <main class="trip-view">
-    <div class="trip-routebar">
+    <main class="trip-view" class:canvas-focused={canvasFocused}>
+      <div class="trip-routebar">
       <div class="route-origin"><span>{current.seed}</span><small>{path.length} {path.length === 1 ? 'idea' : 'ideas'} travelled</small></div>
-      <nav class="path-rail" aria-label="Ideas travelled">
+      <nav bind:this={pathRail} class="path-rail" aria-label="Ideas travelled">
         {#each path as step, index (index)}
           {#if showFullPath || path.length <= 4 || index === 0 || index >= path.length - 2}
           {#if index}<span class="path-join" aria-hidden="true">→</span>{/if}
@@ -449,8 +518,15 @@
           {#if index === 0 && path.length > 4}<button type="button" class="path-fold" aria-expanded={showFullPath} aria-label={showFullPath ? 'Collapse earlier steps in path' : `Show ${path.length - 3} earlier steps in path`} onclick={() => showFullPath = !showFullPath}>{showFullPath ? 'Less' : `⋯ ${path.length - 3} earlier`}</button>{/if}
           {/if}
         {/each}
-      </nav>
-    </div>
+        </nav>
+        <button type="button" class="saved-concepts-trigger" aria-label={`Saved concepts, ${cards.length}`} title="Open saved concepts" onclick={() => savedDialog?.showModal()}>
+          <Bookmark size={18} aria-hidden="true" /><span>Saved concepts</span><b>{cards.length}</b>
+        </button>
+        <button type="button" class="canvas-focus-toggle" aria-label={canvasFocused ? 'Show header and idea details' : 'Maximize brainstorming canvas'} title={canvasFocused ? 'Show header and idea details' : 'Maximize brainstorming canvas'} onclick={() => canvasFocused = !canvasFocused}>
+          {#if canvasFocused}<Minimize2 size={19} strokeWidth={1.9} aria-hidden="true" />{:else}<Maximize2 size={19} strokeWidth={1.9} aria-hidden="true" />{/if}
+          <span>{canvasFocused ? 'Show details' : 'Focus canvas'}</span>
+        </button>
+      </div>
 
     <ThreadCanvas
       {nodes}
@@ -464,27 +540,33 @@
     />
 
     {#if nearby.length || loadingId === focus.id || focus.parent_id}
-      <section class="nearby-rail" aria-label="Nearby ideas">
-        <span class="nearby-heading">From this idea</span>
-        {#if nearby.length}
-          <div class="nearby-scroll">
-            {#each nearby as idea (idea.id)}
-              <div class="nearby-choice">
-                <button type="button" class="nearby-follow" aria-label={`Follow ${idea.label}`} onclick={() => visitNode(idea.id)}>{idea.label}</button>
-                <button type="button" class="nearby-pin" class:saved={!!idea.pinned} disabled={pinningIds.has(idea.id)} aria-label={pinningIds.has(idea.id) ? `Saving ${idea.label}` : idea.pinned ? `View saved concept for ${idea.label}` : `Pin ${idea.label} without following it`} title={idea.pinned ? 'View saved concept' : 'Pin without following'} onclick={() => void pin(idea.id)}>
-                  {#if pinningIds.has(idea.id)}<span class="pin-spinner" aria-hidden="true"></span>{:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-1.2 5.1 3.2 3.2v1.2H6v-1.2l3.2-3.2L8 3Zm4 9.5V21"/></svg>{/if}
-                </button>
-              </div>
-            {/each}
-          </div>
-        {:else if loadingId === focus.id}<span class="nearby-wait" role="status">Finding nearby ideas…</span>
-        {:else if focus.parent_id}<button type="button" class="nearby-back" onclick={() => visitNode(focus!.parent_id!)}>← Back to {nodes.find(node => node.id === focus?.parent_id)?.label ?? 'previous idea'}</button>{/if}
+      <section class="nearby-rail" class:canvas-collapsed={canvasFocused} aria-label="Nearby ideas">
+        <button type="button" class="nearby-toggle" aria-expanded={!nearbyCollapsed} aria-controls="nearby-options" onclick={() => nearbyCollapsed = !nearbyCollapsed}>
+          <span>From this idea{nearbyCollapsed && nearby.length ? ` · ${nearby.length}` : ''}</span>
+          <ChevronDown size={17} aria-hidden="true" class={nearbyCollapsed ? 'turned' : ''} />
+          <span class="sr-only">{nearbyCollapsed ? 'Expand nearby ideas' : 'Collapse nearby ideas'}</span>
+        </button>
+        <div id="nearby-options" class="nearby-content" hidden={nearbyCollapsed}>
+          {#if nearby.length}
+            <div class="nearby-scroll">
+              {#each nearby as idea (idea.id)}
+                <div class="nearby-choice">
+                  <button type="button" class="nearby-follow" aria-label={idea.expanded ? `Follow explored idea ${idea.label}` : `Explore ${idea.label}; generates new ideas using your model budget`} title={idea.expanded ? 'Follow explored idea' : 'Generate new ideas · uses model budget'} onclick={() => visitNode(idea.id)}><span>{idea.label}</span><small>{idea.expanded ? 'Explore this idea' : 'New ideas · uses model budget'}</small></button>
+                  <button type="button" class="nearby-pin" class:saved={!!idea.pinned} disabled={pinningIds.has(idea.id)} aria-label={pinningIds.has(idea.id) ? `Writing concept for ${idea.label}` : idea.pinned ? `View saved concept for ${idea.label}` : `Write a concept card for ${idea.label}; uses model budget`} title={idea.pinned ? 'View saved concept' : 'Write concept card · uses model budget'} onclick={() => void pin(idea.id)}>
+                    {#if pinningIds.has(idea.id)}<span class="pin-spinner" aria-hidden="true"></span>{:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-1.2 5.1 3.2 3.2v1.2H6v-1.2l3.2-3.2L8 3Zm4 9.5V21"/></svg>{/if}
+                  </button>
+                </div>
+              {/each}
+            </div>
+          {:else if loadingId === focus.id}<span class="nearby-wait" role="status">Finding nearby ideas…</span>
+          {:else if focus.parent_id}<button type="button" class="nearby-back" onclick={() => visitNode(focus!.parent_id!)}>← Back to {nodes.find(node => node.id === focus?.parent_id)?.label ?? 'previous idea'}</button>{/if}
+        </div>
       </section>
     {/if}
 
-    <footer class="idea-dock">
+    <footer class="idea-dock" class:canvas-collapsed={canvasFocused}>
       <div class="idea-dock-copy">
-        <span class="idea-dock-kicker">{loadingId === focus.id ? (loadingNote || busy || 'Following the thread…') : focus.pinned ? 'A concept you saved' : 'Current idea'}</span>
+        <span class="idea-dock-kicker">{queuedExpansionId === focus.id ? 'Queued · uses model budget' : loadingId === focus.id ? (loadingNote || busy || 'Following the thread…') : focus.pinned ? 'A concept you saved' : 'Current idea'}</span>
         <h1>{focus.label}</h1>
         <small>{nodes.length} ideas · ${spent.toFixed(3)} budgeted today</small>
         {#if focusCard}<p class="concept-teaser">{focusCard.pitch}</p>{/if}
@@ -492,7 +574,7 @@
       <div class="idea-dock-actions">
         {#if failedExpansionId === focus.id}<button type="button" class="primary" onclick={() => void expand(focus!.id)}>Try again</button>{/if}
         {#if focus.pinned}<button type="button" class="secondary" onclick={() => { selectedId = focus!.id; exportText = ''; cardDialog?.showModal(); }}>View concept</button>
-        {:else}<button type="button" class="secondary" disabled={pinningIds.has(focus.id)} aria-busy={pinningIds.has(focus.id)} onclick={() => void pin(focus!.id)}>{pinningIds.has(focus.id) ? 'Writing concept…' : 'Pin idea'}</button>{/if}
+        {:else}<div class="model-action"><button type="button" class="secondary" title="Write a concept card using your model budget" disabled={pinningIds.has(focus.id)} aria-busy={pinningIds.has(focus.id)} onclick={() => void pin(focus!.id)}>{pinningIds.has(focus.id) ? 'Writing concept…' : 'Write concept'}</button><small>Uses model budget</small></div>{/if}
         {#if focus.parent_id}<button type="button" class="back-idea" onclick={() => visitNode(focus!.parent_id!)} aria-label="Go back to previous idea">← Back</button>{/if}
       </div>
     </footer>
@@ -500,21 +582,46 @@
 {/if}
 
 <dialog bind:this={historyDialog} class="drawer" aria-label="Saved trips" onclose={() => {}}>
-  <div class="dialog-top"><h2>Your trips</h2><button type="button" class="close-button" onclick={() => historyDialog.close()} aria-label="Close trips">×</button></div>
+  <div class="dialog-top"><h2>Your trips</h2><button type="button" class="close-button" onclick={() => historyDialog?.close()} aria-label="Close trips">×</button></div>
   <p class="dialog-intro">Pick up a thread where you left it.</p>
   {#if trips.length}<div class="trip-list">{#each trips as trip (trip.id)}<button type="button" onclick={() => void perform('Opening trip…', () => loadTrip(trip.id))}><strong>{trip.seed}</strong><span>{new Date(`${trip.created_at.replace(' ', 'T')}Z`).toLocaleDateString()}</span></button>{/each}</div>{:else}<p class="dialog-intro">No trips yet. Start with one small thought.</p>{/if}
   <button type="button" class="primary dialog-new" onclick={startNew}>Start a new trip <span aria-hidden="true">↗</span></button>
 </dialog>
 
-<dialog bind:this={settingsDialog} class="settings-dialog" aria-label="Settings">
-  <div class="dialog-top"><h2>Settings</h2><button type="button" class="close-button" onclick={() => settingsDialog.close()} aria-label="Close settings">×</button></div>
-  <section><h3>Your kit</h3><p>Materials you own can tug the next trip toward what you could actually make.</p><label for="kit">Comma-separated items</label><textarea id="kit" bind:value={kitText} rows="3" placeholder="ESP32, thermal printer"></textarea><button type="button" class="secondary" disabled={!!busy} onclick={() => void saveKit()}>Save kit</button></section>
-  <section><h3>OpenRouter key</h3><p>{setup.masked} {setup.status === 'managed' ? '· Managed by file' : ''}</p>{#if setup.status !== 'managed'}<form onsubmit={event => { event.preventDefault(); void connect(); }}><label for="replace-key">Replace key</label><input id="replace-key" type="password" autocomplete="off" bind:value={key} required /><button type="submit" class="secondary" disabled={!!busy}>Validate & replace</button></form><button type="button" class="subtle-link" onclick={() => void perform('Removing key…', async () => { setup = await api('/api/setup/key', 'DELETE'); settingsDialog.close(); })}>Remove key</button>{/if}</section>
-  <section><h3>Spend limits</h3><p>Budgeted spend includes conservative reservations for calls with unknown costs.</p><form onsubmit={event => { event.preventDefault(); void saveLimits(); }}><label for="expansion-cap">Daily expansions</label><input id="expansion-cap" type="number" min="1" max="1000" bind:value={expansionCap} /><label for="pin-cap">Daily pins</label><input id="pin-cap" type="number" min="1" max="1000" bind:value={pinCap} /><label for="hourly-limit">Hourly limit ($)</label><input id="hourly-limit" type="number" min="0.01" max="100" step="0.01" bind:value={hourlyLimit} /><button type="submit" class="secondary" disabled={!!busy}>Save limits</button></form></section>
+<dialog bind:this={savedDialog} class="drawer saved-dialog" aria-label="Saved concepts" onclose={() => {}}>
+  <div class="dialog-top"><h2>Saved concepts</h2><button type="button" class="close-button" onclick={() => savedDialog?.close()} aria-label="Close saved concepts">×</button></div>
+  <p class="dialog-intro">Ideas you kept from this trip, ready to revisit or export.</p>
+  {#if cards.length}
+    <div class="saved-concept-list">
+      {#each cards as card (card.id)}
+        <article class="saved-concept-item">
+          <button type="button" class="saved-concept-open" onclick={() => openSavedConcept(card)}>
+            <strong>{nodes.find(node => node.id === card.node_id)?.label ?? 'Saved idea'}</strong>
+            <span>{card.pitch}</span>
+            <small>View concept and export →</small>
+          </button>
+          <button type="button" class="saved-concept-map" onclick={() => showSavedOnMap(card)}>Show on map</button>
+        </article>
+      {/each}
+    </div>
+  {:else}
+    <p class="saved-empty">No concepts saved yet. Explore a promising branch, then write a concept card to keep it here.</p>
+  {/if}
+</dialog>
+
+<dialog bind:this={settingsDialog} class="settings-dialog" aria-label="Settings" onclose={() => { dialogFeedback = ''; dialogBusy = ''; settingsSaved = ''; uncertain = null; }}>
+  <div class="dialog-top"><h2>Settings</h2><button type="button" class="close-button" onclick={() => settingsDialog?.close()} aria-label="Close settings"><span aria-hidden="true">×</span></button></div>
+  {#if dialogBusy}<p class="dialog-feedback progress" role="status"><span class="activity" aria-hidden="true"></span>{dialogBusy}</p>{/if}
+  {#if dialogFeedback}<div class="dialog-feedback error" role="alert"><span>{dialogFeedback}</span>{#if uncertain}<button type="button" onclick={() => void retryUncertain('settings')}>Review & retry</button>{/if}<button type="button" aria-label="Dismiss message" onclick={() => { dialogFeedback = ''; uncertain = null; }}>Dismiss</button></div>{/if}
+  <section><h3>Your kit</h3><p>Materials you own can tug the next trip toward what you could actually make.</p><label for="kit">Comma-separated items</label><textarea id="kit" bind:value={kitText} rows="3" placeholder="ESP32, thermal printer" oninput={() => settingsSaved = ''}></textarea><button type="button" class="secondary" disabled={!!busy} onclick={() => void saveKit()}>Save kit</button>{#if settingsSaved === 'kit'}<p class="save-confirmation" role="status">Kit saved. It will shape your next trip.</p>{/if}</section>
+  <section><h3>OpenRouter key</h3><p>{setup.masked} {setup.status === 'managed' ? '· Managed by file' : ''}</p>{#if setup.status !== 'managed'}<form onsubmit={event => { event.preventDefault(); void connect(); }}><label for="replace-key">Replace key</label><input id="replace-key" type="password" autocomplete="off" bind:value={key} required /><button type="submit" class="secondary" disabled={!!busy}>Validate & replace</button></form><button type="button" class="subtle-link" onclick={() => void perform('Removing key…', async () => { setup = await api('/api/setup/key', 'DELETE'); settingsDialog?.close(); }, undefined, 'settings')}>Remove key</button>{/if}</section>
+  <section><h3>Spend limits</h3><p>Model calls reserve against these limits before running. Today’s budgeted spend is ${spent.toFixed(3)}; usage can settle at a different amount.</p><form onsubmit={event => { event.preventDefault(); void saveLimits(); }}><label for="expansion-cap">Daily expansions</label><input id="expansion-cap" type="number" min="1" max="1000" bind:value={expansionCap} oninput={() => settingsSaved = ''} /><label for="pin-cap">Daily pins</label><input id="pin-cap" type="number" min="1" max="1000" bind:value={pinCap} oninput={() => settingsSaved = ''} /><label for="hourly-limit">Hourly limit ($)</label><input id="hourly-limit" type="number" min="0.01" max="100" step="0.01" bind:value={hourlyLimit} oninput={() => settingsSaved = ''} /><button type="submit" class="secondary" disabled={!!busy}>Save limits</button></form>{#if settingsSaved === 'limits'}<p class="save-confirmation" role="status">Spend limits saved.</p>{/if}</section>
   <button type="button" class="danger-link" onclick={() => void deleteData()}>Delete all creative data</button>
 </dialog>
 
-<dialog bind:this={cardDialog} class="card-dialog" aria-label="Concept card" onclose={() => exportText = ''}>
-  <div class="dialog-top"><h2>Concept: {selected?.label}</h2><button type="button" class="close-button" onclick={() => cardDialog.close()} aria-label="Close concept">×</button></div>
-  {#if selectedCard}<p class="card-pitch">{selectedCard.pitch}</p><div class="card-details"><div><h3>The thread</h3><p>{JSON.parse(selectedCard.chain).join(' → ')}</p></div><div><h3>Rough stack</h3><p>{selectedCard.stack}</p></div><div><h3>Smallest prototype</h3><p>{selectedCard.prototype}</p></div><div><h3>Wildcard</h3><p>{selectedCard.wildcard}</p></div></div><div class="export-actions"><button type="button" class="secondary" onclick={() => void preview('markdown')}>Preview Markdown</button><button type="button" class="secondary" onclick={() => void preview('agent')}>Preview agent prompt</button></div>{#if exportText}<label for="preview">Export preview</label><textarea id="preview" readonly rows="10" value={exportText}></textarea><button type="button" class="primary" onclick={() => void navigator.clipboard.writeText(exportText)}>Copy to clipboard</button>{/if}{/if}
+<dialog bind:this={cardDialog} class="card-dialog" aria-label="Concept card" onclose={() => { exportText = ''; exportFormat = null; copyStatus = ''; exportTrigger = null; dialogFeedback = ''; dialogBusy = ''; uncertain = null; }}>
+  <div class="dialog-top"><h2>Concept: {selected?.label}</h2><button type="button" class="close-button" onclick={() => cardDialog?.close()} aria-label="Close concept"><span aria-hidden="true">×</span></button></div>
+  {#if dialogBusy}<p class="dialog-feedback progress" role="status"><span class="activity" aria-hidden="true"></span>{dialogBusy}</p>{/if}
+  {#if dialogFeedback}<div class="dialog-feedback error" role="alert"><span>{dialogFeedback}</span>{#if uncertain}<button type="button" onclick={() => void retryUncertain('card')}>Review & retry</button>{/if}<button type="button" aria-label="Dismiss message" onclick={() => { dialogFeedback = ''; uncertain = null; }}>Dismiss</button></div>{/if}
+  {#if selectedCard}<div class="card-actions-top"><button type="button" class="primary" aria-pressed={exportFormat === 'markdown'} onclick={event => void preview('markdown', event.currentTarget)}><span>Preview Markdown</span>{#if exportFormat === 'markdown'}<Minus size={17} aria-hidden="true" />{:else}<Plus size={17} aria-hidden="true" />{/if}</button><button type="button" class="secondary" aria-pressed={exportFormat === 'agent'} onclick={event => void preview('agent', event.currentTarget)}><span>Preview agent prompt</span>{#if exportFormat === 'agent'}<Minus size={17} aria-hidden="true" />{:else}<Plus size={17} aria-hidden="true" />{/if}</button></div>{#if exportText}<section class="export-result" aria-labelledby="export-result-title"><div class="export-result-heading"><h3 bind:this={exportPreviewHeading} id="export-result-title" tabindex="-1">{exportFormat === 'agent' ? 'Agent prompt preview' : 'Markdown preview'}</h3></div><div class="export-preview-frame"><textarea bind:this={exportResult} id="export-preview" aria-label="Export text" readonly rows="5" value={exportText}></textarea><button type="button" class="export-copy-button" aria-label={copyStatus === 'Copied to clipboard' ? 'Copied to clipboard' : `Copy ${exportFormat === 'agent' ? 'agent prompt' : 'Markdown'} to clipboard`} title={copyStatus === 'Copied to clipboard' ? 'Copied' : 'Copy to clipboard'} onclick={() => void copyExport()}>{#if copyStatus === 'Copied to clipboard'}<Check size={18} strokeWidth={2} aria-hidden="true" />{:else}<Copy size={18} strokeWidth={1.8} aria-hidden="true" />{/if}</button></div><p class="copy-status" role="status" aria-live="polite">{copyStatus || 'Review the text, then copy it when ready.'}</p></section>{/if}<p class="card-pitch">{selectedCard.pitch}</p><div class="card-details"><div><h3>The thread</h3><p>{JSON.parse(selectedCard.chain).join(' → ')}</p></div><div><h3>Rough stack</h3><p>{selectedCard.stack}</p></div><div><h3>Smallest prototype</h3><p>{selectedCard.prototype}</p></div><div><h3>Wildcard</h3><p>{selectedCard.wildcard}</p></div></div>{/if}
 </dialog>

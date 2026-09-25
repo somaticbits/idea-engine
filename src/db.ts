@@ -77,7 +77,7 @@ export function getGraph(tripId: string) {
   return {
     trip,
     nodes: db.prepare('SELECT * FROM nodes WHERE trip_id=? ORDER BY created_at,id').all(tripId) as Node[],
-    cards: db.prepare('SELECT cards.* FROM cards JOIN nodes ON cards.node_id=nodes.id WHERE nodes.trip_id=?').all(tripId),
+    cards: db.prepare('SELECT cards.id,cards.node_id,cards.pitch,cards.chain,cards.stack,cards.prototype,cards.wildcard,cards.route_snapshot,cards.created_at FROM cards JOIN nodes ON cards.node_id=nodes.id WHERE nodes.trip_id=?').all(tripId),
     connections: db.prepare('SELECT c.* FROM connections c JOIN nodes n ON n.id=c.from_node_id WHERE n.trip_id=?').all(tripId) as Connection[],
     route: route ? { nodes: JSON.parse(route.nodes) as string[], cursor: route.cursor } : { nodes: [], cursor: 0 },
   };

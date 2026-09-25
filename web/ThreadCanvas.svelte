@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+import { onMount } from 'svelte';
+  import { fitGraph, resolveNodeCollisions } from '../src/graph-layout';
 
   type Idea = { id: string; parent_id: string | null; label: string; expanded: number; pinned: number; x: number; y: number };
   type Link = { id: string; from_node_id: string; to_node_id: string; kind: string };
@@ -39,36 +40,46 @@
     return () => { resize.disconnect(); motion.removeEventListener('change', change); };
   });
 
-  const centerIdea = $derived(nodes.find(node => node.id === currentId) ?? nodes[0]);
   const activeIds = $derived(new Set([...route.nodes, currentId, ...nodes.filter(node => node.pinned).map(node => node.id)]));
   const nearbyChildren = $derived(nodes.filter(node => node.parent_id === currentId));
   const visibleIds = $derived.by(() => {
     const ids = new Set(showAllIdeas ? nodes.map(node => node.id) : activeIds);
-    if (!showAllIdeas) nearbyChildren.slice(0, 8).forEach(node => ids.add(node.id));
+    if (!showAllIdeas) {
+      nearbyChildren.slice(0, 8).forEach(node => ids.add(node.id));
+      for (const pinned of nodes.filter(node => node.pinned)) {
+        let ancestorId = pinned.parent_id;
+        while (ancestorId && !ids.has(ancestorId)) {
+          ids.add(ancestorId);
+          ancestorId = nodes.find(node => node.id === ancestorId)?.parent_id ?? null;
+        }
+      }
+    }
     return ids;
   });
-  const visibleNodes = $derived(nodes.filter(node => visibleIds.has(node.id)));
+  const displayNodes = $derived(resolveNodeCollisions(nodes));
+  const centerIdea = $derived(displayNodes.find(node => node.id === currentId) ?? displayNodes[0]);
+  const visibleNodes = $derived(displayNodes.filter(node => visibleIds.has(node.id)));
   const hiddenCount = $derived(nodes.filter(node => !visibleIds.has(node.id)).length);
   const currentWorld = $derived(centerIdea ? { x: centerIdea.x, y: centerIdea.y } : { x: 0, y: 0 });
-  const cameraStyle = $derived(`left:50%;top:50%;transform:translate(${panX - currentWorld.x * zoom}px,${panY - currentWorld.y * zoom}px) scale(${zoom});transition-duration:${reducedMotion ? '0ms' : '520ms'}`);
+  const cameraStyle = $derived(`--map-zoom:${zoom};left:50%;top:50%;transform:translate(${panX - currentWorld.x * zoom}px,${panY + (width < 750 && !showAllIdeas ? 42 : 0) - currentWorld.y * zoom}px) scale(${zoom});transition-duration:${reducedMotion ? '0ms' : '520ms'}`);
   const routeEdges = $derived(new Set(route.nodes.slice(0, route.cursor + 1).slice(1).flatMap((id, index) => [`${route.nodes[index]}:${id}`, `${id}:${route.nodes[index]}`])));
   const treeEdges = $derived(visibleNodes.filter(node => node.parent_id && visibleIds.has(node.parent_id)).map(node => ({
     id: `tree:${node.id}`,
-    from: nodes.find(parent => parent.id === node.parent_id)!,
+    from: displayNodes.find(parent => parent.id === node.parent_id)!,
     to: node,
     travelled: routeEdges.has(`${node.parent_id}:${node.id}`),
     loop: false,
   })).filter(edge => edge.from));
   const loopEdges = $derived(connections.filter(link => visibleIds.has(link.from_node_id) && visibleIds.has(link.to_node_id)).map(link => ({
     id: link.id,
-    from: nodes.find(node => node.id === link.from_node_id)!,
-    to: nodes.find(node => node.id === link.to_node_id)!,
+    from: displayNodes.find(node => node.id === link.from_node_id)!,
+    to: displayNodes.find(node => node.id === link.to_node_id)!,
     travelled: routeEdges.has(`${link.from_node_id}:${link.to_node_id}`),
     loop: true,
   })).filter(edge => edge.from && edge.to));
   const edges = $derived([...treeEdges, ...loopEdges]);
   function pointerDown(event: PointerEvent) {
-    if ((event.target as HTMLElement).closest('.idea-node,button')) return;
+    if ((event.target as HTMLElement).closest('.idea-node,button,.map-legend')) return;
     dragging = true;
     pointer = { x: event.clientX, y: event.clientY };
     viewport.setPointerCapture(event.pointerId);
@@ -79,7 +90,7 @@
     const rect = viewport.getBoundingClientRect();
     const x = event.clientX - rect.left - width / 2;
     const y = event.clientY - rect.top - height / 2;
-    const nextZoom = Math.max(.18, Math.min(2.4, zoom * Math.exp(-event.deltaY * .0012)));
+    const nextZoom = Math.max(.04, Math.min(2.4, zoom * Math.exp(-event.deltaY * .0012)));
     const factor = nextZoom / zoom;
     panX = x - (x - panX) * factor;
     panY = y - (y - panY) * factor;
@@ -87,7 +98,7 @@
   }
 
   function zoomBy(factor: number) {
-    const nextZoom = Math.max(.18, Math.min(2.4, zoom * factor));
+    const nextZoom = Math.max(.04, Math.min(2.4, zoom * factor));
     zoom = nextZoom;
   }
 
@@ -118,14 +129,15 @@
       zoom = 1;
       return;
     }
-    const bounds = nodes.reduce((result, node) => ({ minX: Math.min(result.minX, node.x), maxX: Math.max(result.maxX, node.x), minY: Math.min(result.minY, node.y), maxY: Math.max(result.maxY, node.y) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
-    const { minX, maxX, minY, maxY } = bounds;
-    zoom = Math.max(.3, Math.min(1, width / (maxX - minX + 300), height / (maxY - minY + 240)));
-    const graphCenterX = (minX + maxX) / 2;
-    const graphCenterY = (minY + maxY) / 2;
-    panX = (currentWorld.x - graphCenterX) * zoom;
-    panY = (currentWorld.y - graphCenterY) * zoom;
   }
+
+  $effect(() => {
+    if (!showAllIdeas) return;
+    const fitted = fitGraph(displayNodes, width, height, currentWorld);
+    zoom = fitted.zoom;
+    panX = fitted.panX;
+    panY = fitted.panY;
+  });
 
   $effect(() => {
     currentId;
@@ -163,14 +175,13 @@
           class:visited={route.nodes.includes(node.id)}
           class:pinned={!!node.pinned}
           aria-current={node.id === currentId ? 'location' : undefined}
-          aria-label={`${node.label}${node.id === currentId ? ', current idea' : ', follow this idea'}${node.pinned ? ', pinned concept' : ''}`}
-          disabled={showAllIdeas && zoom < .55}
+          aria-label={`${node.label}${node.id === currentId ? ', current idea' : node.expanded ? ', follow explored idea' : ', explore new branch using model budget'}${node.pinned ? ', pinned concept' : ''}`}
           onclick={() => onVisit(node.id)}
           onpointerdown={event => event.stopPropagation()}
         >
           <span class="idea-dot" aria-hidden="true"></span><span class="idea-label">{node.label}</span>
         </button>
-        <button type="button" class="node-pin" class:saved={!!node.pinned} class:saving={pinningIds.has(node.id)} aria-label={pinningIds.has(node.id) ? `Saving ${node.label} as a concept` : node.pinned ? `View saved concept for ${node.label}` : `Pin ${node.label} as a concept`} title={pinningIds.has(node.id) ? 'Saving concept…' : node.pinned ? 'View saved concept' : 'Pin this idea without following it'} disabled={pinningIds.has(node.id)} onclick={() => onPin(node.id)} onpointerdown={event => event.stopPropagation()}>
+        <button type="button" class="node-pin" class:saved={!!node.pinned} class:saving={pinningIds.has(node.id)} aria-label={pinningIds.has(node.id) ? `Saving ${node.label} as a concept` : node.pinned ? `View saved concept for ${node.label}` : `Write a concept card for ${node.label}; uses model budget`} title={pinningIds.has(node.id) ? 'Writing concept…' : node.pinned ? 'View saved concept' : 'Write concept card · uses model budget'} disabled={pinningIds.has(node.id) || (showAllIdeas && zoom < .55)} onclick={() => onPin(node.id)} onpointerdown={event => event.stopPropagation()}>
         {#if pinningIds.has(node.id)}<span class="pin-spinner" aria-hidden="true"></span>{:else}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-1.2 5.1 3.2 3.2v1.2H6v-1.2l3.2-3.2L8 3Zm4 9.5V21"/></svg>{/if}
         </button>
       </div>
@@ -182,7 +193,16 @@
     {/if}
   </div>
 
-  <div class="canvas-hint">{showAllIdeas ? 'Zoom in to read names · drag to wander' : 'Drag to pan · scroll to zoom · tap an idea to follow'}</div>
+  <div class="canvas-hint">{showAllIdeas ? 'Select a point to focus · drag to wander' : 'Drag to pan · scroll to zoom · new branches use model budget'}</div>
+  <details class="map-legend">
+    <summary>Map key</summary>
+    <ul>
+      <li><span class="legend-dot current" aria-hidden="true"></span>Current idea</li>
+      <li><span class="legend-line travelled" aria-hidden="true"></span>Travelled path</li>
+      <li><span class="legend-dot pinned" aria-hidden="true"></span>Saved concept</li>
+      <li><span class="legend-line linked" aria-hidden="true"></span>Related idea</li>
+    </ul>
+  </details>
   <button type="button" class="graph-toggle" aria-pressed={showAllIdeas} onclick={toggleGraph}>{showAllIdeas ? 'Focus path' : `Show full graph${hiddenCount ? ` · ${hiddenCount} hidden` : ''}`}</button>
   <div class="map-controls" role="group" aria-label="Map controls">
     <button type="button" class="zoom-button" onclick={() => zoomBy(1.2)} aria-label="Zoom in">+</button>
