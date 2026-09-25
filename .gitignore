@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/
+teaser.mp4
 .env*
 !.env.example
 secrets/

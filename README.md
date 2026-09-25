@@ -2,9 +2,9 @@
 
 **Follow the strange thread.** Start with a word, wander through unexpected connections, and turn the best one into something you could build.
 
-[![Idea Engine demo: start with a seed and turn an idea into a concept card](assets/teaser.jpg)](teaser.mp4)
+[![Idea Engine demo: start with a seed and turn an idea into a concept card](assets/teaser.jpg)](https://media.somaticbits.xyz/teaser.mp4)
 
-**[▶ Watch the 47-second teaser](teaser.mp4)**
+**[▶ Watch the 47-second teaser](https://media.somaticbits.xyz/teaser.mp4)**
 
 ## How it works
 
