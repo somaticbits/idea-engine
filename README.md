@@ -1,41 +1,37 @@
 # Idea Engine
 
-A local-first creative technology playground. Start with a seed, explore associations filtered by Jev, and pin interesting nodes into buildable concept cards. One user per instance; you bring an OpenRouter key.
+**Follow the strange thread.** Start with a word, wander through unexpected connections, and turn the best one into something you could build.
 
-## Quick start
+[![Idea Engine demo: start with a seed and turn an idea into a concept card](assets/teaser.jpg)](teaser.mp4)
+
+**[▶ Watch the 47-second teaser](teaser.mp4)**
+
+## How it works
+
+1. **Start anywhere.** Enter a seed and choose how far the ideas should wander: Near, Open, or Far. Add an optional kit of materials or tools you have on hand.
+2. **Follow a branch.** Explore associations on a visual map, retrace your path, and pick the next idea to develop. Jev filters generated suggestions before they appear.
+3. **Keep what clicks.** Pin an idea to make a concept card with its origin story, rough stack, smallest prototype, and a wildcard. Copy it as Markdown or a coding-agent prompt.
+
+Trips and concepts are saved locally, so you can come back to a thread later.
+
+## Run it locally
+
+You'll need [Docker](https://docs.docker.com/get-docker/) and your own [OpenRouter API key](https://openrouter.ai/settings/keys).
 
 ```sh
-git clone <repository-url> idea-engine
+git clone https://github.com/somaticbits/idea-engine.git
 cd idea-engine
 docker compose up --build
 ```
 
-Open <http://127.0.0.1:8080>. Paste an OpenRouter key on the setup screen, or mount one as a read-only file. The setup validates both chat and Jev access. Set a spending limit on your key in [OpenRouter settings](https://openrouter.ai/settings/keys) and consider disabling auto-recharge.
+Open **http://127.0.0.1:8080** and paste your key into the setup screen. The app checks that the key can access both chat and Jev. Your trips are stored in a local Docker volume; stop the app with `Ctrl+C`.
 
-The Compose port is bound to loopback and there is **no login**. Do not publish the app on your network: anyone who can reach it can spend your credits. Data is stored on a local Docker volume; seeds, kit and graph context are sent to OpenRouter and serving providers during model calls. No analytics are included.
+For local development instead, use Node 22 and run `npm ci` followed by `npm run dev`. Open **http://127.0.0.1:5173**.
 
-### Key file
+## Before you explore
 
-In `compose.yaml`, add a read-only bind mount under `app.volumes` such as `- ./secrets/openrouter:/run/secrets/openrouter:ro`, and set `OPENROUTER_API_KEY_FILE=/run/secrets/openrouter` in the service environment. Protect that file with `chmod 600`. File-managed keys take precedence over pasted keys.
+- Model calls use your OpenRouter credits, including setup checks and retries. Set a spending limit on your key. The app also defaults to **200 expansions/day**, **30 pins/day**, and **$2/hour** in budgeted spend; its estimate is not your OpenRouter bill.
+- This is a **single-user, loopback-only** app with no login. Don't expose port 8080 to your network. Seeds, kit items, and graph context are sent to OpenRouter and its serving providers when generating ideas.
+- The browser doesn't call OpenRouter directly; the local server handles requests and stores your work. No analytics are included.
 
-### Development
-
-Requires Node 22. Run `npm ci`, then `npm run dev`. The UI runs at <http://127.0.0.1:5173> and proxies API requests to port 8080. Run `npm run check`, `npm test`, and `npm run build` before shipping.
-
-### Cost and privacy
-
-The default caps are 200 expansions/day, 30 pins/day, and $2 in any rolling hour. Every model call is charged to your OpenRouter key, including setup validation and retries. The UI shows **budgeted** spend: provider-reported `usage.cost` where available, plus conservative reservations for uncertain calls. It is not your OpenRouter bill. Actual trip cost and latency depend on provider routing. Jev is required; a failed filter never falls back to unfiltered candidates. A timed-out call is never silently retried; a manual retry may be billed again.
-
-Pinned concept cards preserve the original idea, its association path and a prototype-sized plan. Export a card as Markdown or as a prompt for a coding agent from the card view.
-
-**Release gate:** OpenRouter chat privacy-routing parameters are sent on chat calls; System One / Jev zero-retention support, fallback provider support, model IDs and parameter behavior must be confirmed with a live key before claiming zero retention or publishing a release. No key is bundled with the app.
-
-### Architecture
-
-Browser (Svelte + a stable SVG branch map) → Node/Hono gateway → OpenRouter Dreamer → Jev filter → SQLite; pinning invokes Narrator. The browser never calls OpenRouter directly. Expansion streams progress stages, then returns accepted nodes after filtering.
-
-### Design workflow
-
-The project includes [Impeccable](https://impeccable.style/) project-local skills, `PRODUCT.md`, `DESIGN.md`, and a focused-explorer surface brief. Impeccable's CLI requires Node 22.18 or newer. Restart OpenCode after installing or updating the project-local skill, then use `/impeccable` for future design sessions. Its detector can scan the Svelte UI with `npx impeccable detect web/` when a compatible Node is available. The app itself does not require Impeccable to run.
-
-MIT licensed. See [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
+[MIT license](LICENSE) · [Security](SECURITY.md)
