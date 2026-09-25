@@ -14,6 +14,7 @@ import { narrate } from './pipeline/narrate.js';
 import { exportCard } from './export.js';
 import { ProviderError, ResultError } from './pipeline/provider.js';
 import { normalizeIdea, placeChildren } from './graph-layout.js';
+import { retryForUsableAssociations } from './pipeline/association-retry.js';
 
 const app = new Hono();
 const origin = 'http://127.0.0.1:8080';
@@ -46,7 +47,7 @@ app.put('/api/setup/key', async c => {
   return c.json(await keyStatus());
 });
 app.delete('/api/setup/key', async c => { await removeKey(); return c.json(await keyStatus()); });
-app.get('/api/settings', c => c.json({ ...(db.prepare('SELECT * FROM settings WHERE id=1').get() as object), spend_today: spendToday() }));
+app.get('/api/settings', c => c.json({ ...(db.prepare('SELECT daily_expansion_cap,daily_pin_cap,hourly_spend_limit FROM settings WHERE id=1').get() as object), spend_today: spendToday() }));
 app.put('/api/settings', async c => {
   const body = await c.req.json();
   const { daily_expansion_cap, daily_pin_cap, hourly_spend_limit } = body;
@@ -131,10 +132,20 @@ app.post('/api/nodes/:id/expand', async c => {
   const kit = JSON.parse(trip.kit) as string[];
   const run = async (progress: (stage: string) => void) => {
     await runOperation('expand', node.id, dose, async (key, opId) => {
-    progress('Dreaming of associations');
-    const candidates = await dream(key, trip.seed, chain(node), kit, dose, opId);
-    progress('Filtering with Jev');
-    return filter(key, trip.seed, node.label, kit, candidates, dose, opId);
+    return retryForUsableAssociations(async () => {
+      progress('Dreaming of associations');
+      const candidates = await dream(key, trip.seed, chain(node), kit, dose, opId);
+      if (candidates.length === 0) throw new ResultError('Dreamer returned no usable association phrases.');
+      progress('Filtering with Jev');
+      return filter(key, trip.seed, node.label, kit, candidates, dose, opId);
+    }, results => {
+      const tripNodes = db.prepare('SELECT id,parent_id,label FROM nodes WHERE trip_id=?').all(node.trip_id) as Pick<import('./db.js').Node, 'id' | 'parent_id' | 'label'>[];
+      const labels = new Map(tripNodes.map(existing => [normalizeIdea(existing.label), existing]));
+      return results.some(item => {
+        const match = labels.get(normalizeIdea(item.label));
+        return !match || (match.id !== node.id && match.parent_id !== node.id);
+      });
+    }, attempt => progress(`Searching for usable branches · attempt ${attempt}/3`));
     }, results => {
     const tripNodes = db.prepare('SELECT * FROM nodes WHERE trip_id=? ORDER BY created_at,id').all(node.trip_id) as import('./db.js').Node[];
     const labels = new Map(tripNodes.map(existing => [normalizeIdea(existing.label), existing]));
@@ -208,6 +219,7 @@ app.get('/api/cards/:id/export', c => {
 });
 app.delete('/api/data', c => { db.transaction(() => { db.prepare('DELETE FROM trips').run(); db.prepare('DELETE FROM operations').run(); })(); return c.json({ ok: true }); });
 
+app.all('/api/*', c => c.json({ error: 'API route not found.' }, 404));
 app.use('/*', serveStatic({ root: './public' }));
 app.get('*', async c => c.html(await readFile('./public/index.html', 'utf8')));
 serve({ fetch: app.fetch, port: 8080, hostname: '0.0.0.0' });

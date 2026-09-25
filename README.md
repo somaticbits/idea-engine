@@ -26,6 +26,8 @@ Requires Node 22. Run `npm ci`, then `npm run dev`. The UI runs at <http://127.0
 
 The default caps are 200 expansions/day, 30 pins/day, and $2 in any rolling hour. Every model call is charged to your OpenRouter key, including setup validation and retries. The UI shows **budgeted** spend: provider-reported `usage.cost` where available, plus conservative reservations for uncertain calls. It is not your OpenRouter bill. Actual trip cost and latency depend on provider routing. Jev is required; a failed filter never falls back to unfiltered candidates. A timed-out call is never silently retried; a manual retry may be billed again.
 
+Pinned concept cards preserve the original idea, its association path and a prototype-sized plan. Export a card as Markdown or as a prompt for a coding agent from the card view.
+
 **Release gate:** OpenRouter chat privacy-routing parameters are sent on chat calls; System One / Jev zero-retention support, fallback provider support, model IDs and parameter behavior must be confirmed with a live key before claiming zero retention or publishing a release. No key is bundled with the app.
 
 ### Architecture
