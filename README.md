@@ -14,6 +14,10 @@
 
 Trips and concepts are saved locally, so you can come back to a thread later.
 
+### The idea
+
+This is a guided association tool, not a one-shot list of startup ideas. You choose the next node; the path you took becomes the raw material for a buildable concept. **Near / Open / Far** changes how surprising the suggestions can be, while an optional kit nudges them toward things you can actually make. A pin turns that specific path into a small prototype plan rather than inventing a new story from scratch.
+
 ## Run it locally
 
 You'll need [Docker](https://docs.docker.com/get-docker/) and your own [OpenRouter API key](https://openrouter.ai/settings/keys).
@@ -27,6 +31,18 @@ docker compose up --build
 Open **http://127.0.0.1:8080** and paste your key into the setup screen. The app checks that the key can access both chat and Jev. Your trips are stored in a local Docker volume; stop the app with `Ctrl+C`.
 
 For local development instead, use Node 22 and run `npm ci` followed by `npm run dev`. Open **http://127.0.0.1:5173**.
+
+## Architecture
+
+```text
+Svelte UI (branch map) → Node/Hono API → OpenRouter
+                          │                ├─ Dreamer: proposes associations
+                          │                ├─ Jev: scores and filters them
+                          │                └─ Narrator: writes pinned concept cards
+                          └─ SQLite: trips, nodes, routes, cards, usage
+```
+
+The server sends the seed, current path, and optional kit to the Dreamer. Jev scores the candidates for surprise, coherence, and safety (plus kit fit when relevant), and only accepted branches are saved. Pinning calls the Narrator with the actual association chain; cards can then be exported without another model call. The Svelte client talks only to the local API, which streams expansion progress and keeps the OpenRouter key server-side.
 
 ## Before you explore
 
