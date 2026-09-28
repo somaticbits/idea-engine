@@ -3,10 +3,10 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { streamSSE } from 'hono/streaming';
 import { readFile } from 'node:fs/promises';
-import { db, id, getNode, getGraph, getTrip, children, chain, createTrip, operation } from './db.js';
+import { db, id, getNode, getGraph, getTrip, children, chain, createTrip, operation, getModelSettings, setModelSettings } from './db.js';
 import { getKey, keyStatus, removeKey, saveKey } from './auth/openrouter.js';
 import { MAX_REQUEST_BYTES, type Dose } from './config.js';
-import { tripSchema, expandSchema, kitSchema } from './schema.js';
+import { tripSchema, expandSchema, kitSchema, modelSettingsSchema } from './schema.js';
 import { checkDaily, exclusive, spendToday } from './limits.js';
 import { dream } from './pipeline/dream.js';
 import { filter } from './pipeline/filter.js';
@@ -43,17 +43,54 @@ app.get('/api/setup', async c => c.json(await keyStatus()));
 app.put('/api/setup/key', async c => {
   const { key } = await c.req.json();
   if (typeof key !== 'string') return c.json({ error: 'Key is required.' }, 400);
-  await exclusive(() => saveKey(key.trim()));
+  const models = getModelSettings();
+  await exclusive(() => saveKey(key.trim(), models));
   return c.json(await keyStatus());
 });
 app.delete('/api/setup/key', async c => { await removeKey(); return c.json(await keyStatus()); });
-app.get('/api/settings', c => c.json({ ...(db.prepare('SELECT daily_expansion_cap,daily_pin_cap,hourly_spend_limit FROM settings WHERE id=1').get() as object), spend_today: spendToday() }));
+app.get('/api/settings', c => c.json({
+  ...(db.prepare('SELECT daily_expansion_cap,daily_pin_cap,hourly_spend_limit FROM settings WHERE id=1').get() as object),
+  spend_today: spendToday(), models: getModelSettings(),
+}));
 app.put('/api/settings', async c => {
   const body = await c.req.json();
   const { daily_expansion_cap, daily_pin_cap, hourly_spend_limit } = body;
   if (!Number.isInteger(daily_expansion_cap) || daily_expansion_cap < 1 || daily_expansion_cap > 1000 || !Number.isInteger(daily_pin_cap) || daily_pin_cap < 1 || daily_pin_cap > 1000 || typeof hourly_spend_limit !== 'number' || hourly_spend_limit < 0.01 || hourly_spend_limit > 100) return c.json({ error: 'Invalid limits.' }, 400);
   db.prepare('UPDATE settings SET daily_expansion_cap=?,daily_pin_cap=?,hourly_spend_limit=? WHERE id=1').run(daily_expansion_cap, daily_pin_cap, hourly_spend_limit);
   return c.json(db.prepare('SELECT * FROM settings WHERE id=1').get());
+});
+app.put('/api/settings/models', async c => {
+  const parsed = modelSettingsSchema.safeParse(await c.req.json());
+  if (!parsed.success) return c.json({ error: 'Invalid model settings.', issues: parsed.error.issues }, 400);
+  return c.json({ models: setModelSettings(parsed.data) });
+});
+app.post('/api/settings/models/test', async c => {
+  const parsed = modelSettingsSchema.safeParse(await c.req.json());
+  if (!parsed.success) return c.json({ error: 'Invalid model settings.', issues: parsed.error.issues }, 400);
+  const key = await getKey();
+  if (!key) return c.json({ error: 'Connect an OpenRouter key before testing models.' }, 400);
+
+  const models = parsed.data;
+  const seed = 'model compatibility check';
+  const results: Record<string, { ok: boolean; message: string }> = {};
+  const checks: Array<[keyof typeof models, () => Promise<unknown>]> = [
+    ['dreamer', () => dream(key, seed, [seed], [], 'low', models.dreamer)],
+    ['jev', async () => {
+      const candidates = ['a paper heartbeat'];
+      return filter(key, seed, seed, [], candidates, 'low', models.jev);
+    }],
+    ['narrator', () => narrate(key, [seed, 'a paper heartbeat'], [], models.narrator)],
+  ];
+  for (const [role, check] of checks) {
+    try {
+      await check();
+      results[role] = { ok: true, message: 'Compatible response received.' };
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'The model check failed.';
+      results[role] = { ok: false, message: message.replace(/sk-or-[\w-]+/g, '[redacted]') };
+    }
+  }
+  return c.json({ passed: Object.values(results).every(result => result.ok), results });
 });
 app.get('/api/kit', c => c.json(JSON.parse((db.prepare('SELECT items FROM kit WHERE id=1').get() as { items: string }).items)));
 app.put('/api/kit', async c => { const kit = kitSchema.parse(await c.req.json()); db.prepare('UPDATE kit SET items=? WHERE id=1').run(JSON.stringify(kit)); return c.json(kit); });
@@ -130,14 +167,15 @@ app.post('/api/nodes/:id/expand', async c => {
   if (node.expanded) return c.json(children(node.id));
   const trip = getTrip(node.trip_id)!;
   const kit = JSON.parse(trip.kit) as string[];
+  const models = getModelSettings();
   const run = async (progress: (stage: string) => void) => {
     await runOperation('expand', node.id, dose, async (key, opId) => {
     return retryForUsableAssociations(async () => {
       progress('Dreaming of associations');
-      const candidates = await dream(key, trip.seed, chain(node), kit, dose, opId);
+      const candidates = await dream(key, trip.seed, chain(node), kit, dose, models.dreamer, opId);
       if (candidates.length === 0) throw new ResultError('Dreamer returned no usable association phrases.');
       progress('Filtering with Jev');
-      return filter(key, trip.seed, node.label, kit, candidates, dose, opId);
+      return filter(key, trip.seed, node.label, kit, candidates, dose, models.jev, opId);
     }, results => {
       const tripNodes = db.prepare('SELECT id,parent_id,label FROM nodes WHERE trip_id=?').all(node.trip_id) as Pick<import('./db.js').Node, 'id' | 'parent_id' | 'label'>[];
       const labels = new Map(tripNodes.map(existing => [normalizeIdea(existing.label), existing]));
@@ -202,7 +240,8 @@ app.post('/api/nodes/:id/pin', async c => {
   const tripNodeIds = new Set((db.prepare('SELECT id FROM nodes WHERE trip_id=?').all(node.trip_id) as { id: string }[]).map(row => row.id));
   if (routeSnapshot.some(routeId => !tripNodeIds.has(routeId)) || (routeSnapshot.length && routeSnapshot.at(-1) !== node.id)) return c.json({ error: 'Invalid route snapshot.' }, 400);
   const trip = getTrip(node.trip_id)!;
-  await runOperation('pin', node.id, null, (key, opId) => narrate(key, chain(node), JSON.parse(trip.kit), opId), card => {
+  const models = getModelSettings();
+  await runOperation('pin', node.id, null, (key, opId) => narrate(key, chain(node), JSON.parse(trip.kit), models.narrator, opId), card => {
     const cardId = id();
     db.prepare('INSERT INTO cards(id,node_id,pitch,chain,stack,prototype,wildcard,route_snapshot) VALUES(?,?,?,?,?,?,?,?)').run(cardId, node.id, card.pitch, JSON.stringify(card.chain), card.stack, card.prototype, card.wildcard, JSON.stringify(routeSnapshot));
     db.prepare('UPDATE nodes SET pinned=1 WHERE id=?').run(node.id);
@@ -222,5 +261,9 @@ app.delete('/api/data', c => { db.transaction(() => { db.prepare('DELETE FROM tr
 app.all('/api/*', c => c.json({ error: 'API route not found.' }, 404));
 app.use('/*', serveStatic({ root: './public' }));
 app.get('*', async c => c.html(await readFile('./public/index.html', 'utf8')));
-serve({ fetch: app.fetch, port: 8080, hostname: '0.0.0.0' });
-console.log('Idea Engine listening on port 8080');
+if (process.env.NODE_ENV !== 'test') {
+  serve({ fetch: app.fetch, port: 8080, hostname: '0.0.0.0' });
+  console.log('Idea Engine listening on port 8080');
+}
+
+export { app };

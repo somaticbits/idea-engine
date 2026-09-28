@@ -3,6 +3,7 @@ import { v7 } from 'uuid';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { placeChildren } from './graph-layout.js';
+import { DEFAULT_MODELS, type ModelSettings } from './config.js';
 
 const dbPath = process.env.DB_PATH ?? './data/idea.db';
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -18,11 +19,31 @@ CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, node_id TEXT UNIQUE NOT N
 CREATE TABLE IF NOT EXISTS trip_routes (trip_id TEXT PRIMARY KEY REFERENCES trips(id) ON DELETE CASCADE, nodes TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS kit (id INTEGER PRIMARY KEY CHECK(id=1), items TEXT NOT NULL DEFAULT '[]');
 INSERT OR IGNORE INTO kit(id,items) VALUES(1,'[]');
-CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), daily_expansion_cap INTEGER NOT NULL DEFAULT 200, daily_pin_cap INTEGER NOT NULL DEFAULT 30, hourly_spend_limit REAL NOT NULL DEFAULT 2);
+CREATE TABLE IF NOT EXISTS settings (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  daily_expansion_cap INTEGER NOT NULL DEFAULT 200,
+  daily_pin_cap INTEGER NOT NULL DEFAULT 30,
+  hourly_spend_limit REAL NOT NULL DEFAULT 2,
+  dreamer_model TEXT NOT NULL DEFAULT '${DEFAULT_MODELS.dreamer}',
+  jev_model TEXT NOT NULL DEFAULT '${DEFAULT_MODELS.jev}',
+  narrator_model TEXT NOT NULL DEFAULT '${DEFAULT_MODELS.narrator}'
+);
 INSERT OR IGNORE INTO settings(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_id TEXT NOT NULL, status TEXT NOT NULL, result_id TEXT, dose TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(kind,target_id));
 CREATE TABLE IF NOT EXISTS model_calls (id TEXT PRIMARY KEY, operation_id TEXT, role TEXT NOT NULL, cost REAL, reservation REAL NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 `);
+export function migrateModelSettings(database: Database.Database) {
+  const columns = new Set((database.pragma('table_info(settings)') as { name: string }[]).map(column => column.name));
+  const defaults: Array<[string, string]> = [
+    ['dreamer_model', DEFAULT_MODELS.dreamer],
+    ['jev_model', DEFAULT_MODELS.jev],
+    ['narrator_model', DEFAULT_MODELS.narrator],
+  ];
+  for (const [name, value] of defaults) {
+    if (!columns.has(name)) database.exec(`ALTER TABLE settings ADD COLUMN ${name} TEXT NOT NULL DEFAULT '${value}'`);
+  }
+}
+migrateModelSettings(db);
 const cardColumns = new Set((db.pragma('table_info(cards)') as { name: string }[]).map(column => column.name));
 if (!cardColumns.has('route_snapshot')) db.exec("ALTER TABLE cards ADD COLUMN route_snapshot TEXT NOT NULL DEFAULT '[]'");
 const nodeColumns = new Set((db.pragma('table_info(nodes)') as { name: string }[]).map(column => column.name));
@@ -54,6 +75,16 @@ export type Trip = { id: string; seed: string; dose: string; kit: string; create
 export type Node = { id: string; trip_id: string; parent_id: string | null; label: string; scores: string | null; expanded: number; pinned: number; x: number; y: number };
 export type Connection = { id: string; from_node_id: string; to_node_id: string; kind: string };
 export type Operation = { id: string; kind: string; target_id: string; status: string; result_id: string | null };
+export function getModelSettings(): ModelSettings {
+  const row = db.prepare('SELECT dreamer_model,jev_model,narrator_model FROM settings WHERE id=1').get() as {
+    dreamer_model: string; jev_model: string; narrator_model: string;
+  };
+  return { dreamer: row.dreamer_model, jev: row.jev_model, narrator: row.narrator_model };
+}
+export function setModelSettings(models: ModelSettings) {
+  db.prepare('UPDATE settings SET dreamer_model=?,jev_model=?,narrator_model=? WHERE id=1').run(models.dreamer, models.jev, models.narrator);
+  return getModelSettings();
+}
 export const id = () => v7();
 export const getTrip = (tripId: string) => db.prepare('SELECT * FROM trips WHERE id=?').get(tripId) as Trip | undefined;
 export const getNode = (nodeId: string) => db.prepare('SELECT * FROM nodes WHERE id=?').get(nodeId) as Node | undefined;

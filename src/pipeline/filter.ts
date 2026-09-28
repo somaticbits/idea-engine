@@ -1,4 +1,4 @@
-import { JEV_MODEL, presets, type Dose } from '../config.js';
+import { presets, type Dose } from '../config.js';
 import { callJev, ResultError } from './provider.js';
 
 export type Score = { surprise: number; coherent: number; safe: number; kit?: number };
@@ -33,8 +33,8 @@ export function select(candidates: string[], answers: Record<string, unknown>, d
   }).filter(item => item.scores.safe >= 0.8 && item.scores.coherent >= Math.max(preset.coherence, MIN_PLAUSIBLE_COHERENCE))
     .sort((a, b) => b.rank - a.rank).slice(0, 8);
 }
-export async function filter(key: string, seed: string, parent: string, kit: string[], candidates: string[], dose: Dose, operationId: string) {
-  const result = await callJev(key, { model: JEV_MODEL, state: { seed, parent, kit, candidates }, questions: questionsFor(candidates, kit) }, 'jev', operationId);
+export async function filter(key: string, seed: string, parent: string, kit: string[], candidates: string[], dose: Dose, model: string, operationId?: string) {
+  const result = await callJev(key, { model, state: { seed, parent, kit, candidates }, questions: questionsFor(candidates, kit) }, 'jev', operationId);
   if (!result.answers || typeof result.answers !== 'object') throw new ResultError('Jev returned no answers.');
   return select(candidates, result.answers, dose, kit.length > 0);
 }

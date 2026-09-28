@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { ArrowUpRight, Bookmark, Check, ChevronDown, Copy, Maximize2, Minimize2, Minus, Moon, Plus, Settings, Sun } from '@lucide/svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
+  import { DEFAULT_MODELS, type ModelSettings } from '../src/config.js';
 
   type Node = { id: string; trip_id: string; parent_id: string | null; label: string; expanded: number; pinned: number; x: number; y: number };
   type Trip = { id: string; seed: string; dose: string; created_at: string; kit: string };
@@ -11,6 +12,8 @@
   type Theme = 'light' | 'dark';
   type Setup = { status: 'none' | 'set' | 'managed'; masked: string | null };
   type Action = 'expand' | 'pin';
+  type ModelRole = keyof ModelSettings;
+  type ModelTestResult = { passed: boolean; results: Partial<Record<ModelRole, { ok: boolean; message: string }>> };
 
   let setup = $state<Setup>({ status: 'none', masked: null });
   let seed = $state('');
@@ -40,7 +43,11 @@
   let error = $state('');
   let dialogFeedback = $state('');
   let dialogBusy = $state('');
-  let settingsSaved = $state<'kit' | 'limits' | ''>('');
+  let settingsSaved = $state<'kit' | 'limits' | 'models' | ''>('');
+  let dreamerModel = $state(DEFAULT_MODELS.dreamer);
+  let jevModel = $state(DEFAULT_MODELS.jev);
+  let narratorModel = $state(DEFAULT_MODELS.narrator);
+  let modelTestResult = $state<ModelTestResult | null>(null);
   let uncertain = $state<{ type: Action; id: string } | null>(null);
   let theme = $state<Theme>('light');
   let pinningIds = $state(new Set<string>());
@@ -97,11 +104,14 @@
   async function refresh() {
     setup = await api<Setup>('/api/setup');
     trips = await api<Trip[]>('/api/trips');
-    const settings = await api<{ spend_today: number; daily_expansion_cap: number; daily_pin_cap: number; hourly_spend_limit: number }>('/api/settings');
+    const settings = await api<{ spend_today: number; daily_expansion_cap: number; daily_pin_cap: number; hourly_spend_limit: number; models: ModelSettings }>('/api/settings');
     spent = settings.spend_today;
     expansionCap = settings.daily_expansion_cap;
     pinCap = settings.daily_pin_cap;
     hourlyLimit = settings.hourly_spend_limit;
+    dreamerModel = settings.models.dreamer;
+    jevModel = settings.models.jev;
+    narratorModel = settings.models.narrator;
     kitText = (await api<string[]>('/api/kit')).join(', ');
   }
 
@@ -412,6 +422,36 @@
     }, undefined, 'settings')) settingsSaved = 'limits';
   }
 
+  function currentModels(): ModelSettings {
+    return { dreamer: dreamerModel, jev: jevModel, narrator: narratorModel };
+  }
+
+  function restoreDefaultModels() {
+    dreamerModel = DEFAULT_MODELS.dreamer;
+    jevModel = DEFAULT_MODELS.jev;
+    narratorModel = DEFAULT_MODELS.narrator;
+    modelTestResult = null;
+    settingsSaved = '';
+  }
+
+  async function saveModels() {
+    settingsSaved = '';
+    modelTestResult = null;
+    if (await perform('Saving model choices…', async () => {
+      const result = await api<{ models: ModelSettings }>('/api/settings/models', 'PUT', currentModels());
+      dreamerModel = result.models.dreamer;
+      jevModel = result.models.jev;
+      narratorModel = result.models.narrator;
+    }, undefined, 'settings')) settingsSaved = 'models';
+  }
+
+  async function testModels() {
+    modelTestResult = null;
+    await perform('Testing model compatibility…', async () => {
+      modelTestResult = await api<ModelTestResult>('/api/settings/models/test', 'POST', currentModels());
+    }, undefined, 'settings');
+  }
+
   async function deleteData() {
     if (!confirm('Delete every trip and concept card? Your key and spending history will remain. This cannot be undone.')) return;
     await perform('Deleting trips…', async () => {
@@ -614,7 +654,15 @@
   {#if dialogBusy}<p class="dialog-feedback progress" role="status"><span class="activity" aria-hidden="true"></span>{dialogBusy}</p>{/if}
   {#if dialogFeedback}<div class="dialog-feedback error" role="alert"><span>{dialogFeedback}</span>{#if uncertain}<button type="button" onclick={() => void retryUncertain('settings')}>Review & retry</button>{/if}<button type="button" aria-label="Dismiss message" onclick={() => { dialogFeedback = ''; uncertain = null; }}>Dismiss</button></div>{/if}
   <section><h3>Your kit</h3><p>Materials you own can tug the next trip toward what you could actually make.</p><label for="kit">Comma-separated items</label><textarea id="kit" bind:value={kitText} rows="3" placeholder="ESP32, thermal printer" oninput={() => settingsSaved = ''}></textarea><button type="button" class="secondary" disabled={!!busy} onclick={() => void saveKit()}>Save kit</button>{#if settingsSaved === 'kit'}<p class="save-confirmation" role="status">Kit saved. It will shape your next trip.</p>{/if}</section>
-  <section><h3>OpenRouter key</h3><p>{setup.masked} {setup.status === 'managed' ? '· Managed by file' : ''}</p>{#if setup.status !== 'managed'}<form onsubmit={event => { event.preventDefault(); void connect(); }}><label for="replace-key">Replace key</label><input id="replace-key" type="password" autocomplete="off" bind:value={key} required /><button type="submit" class="secondary" disabled={!!busy}>Validate & replace</button></form><button type="button" class="subtle-link" onclick={() => void perform('Removing key…', async () => { setup = await api('/api/setup/key', 'DELETE'); settingsDialog?.close(); }, undefined, 'settings')}>Remove key</button>{/if}</section>
+   <section><h3>Models</h3><p>Choose model IDs independently. Jev must support the OpenRouter System One endpoint; Dreamer and Narrator use chat completions. Testing sends paid requests.</p>
+     <label for="dreamer-model">Dreamer · associations</label><input id="dreamer-model" bind:value={dreamerModel} oninput={() => { settingsSaved = ''; modelTestResult = null; }} />
+     <label for="jev-model">Jev · filtering</label><input id="jev-model" bind:value={jevModel} oninput={() => { settingsSaved = ''; modelTestResult = null; }} />
+     <label for="narrator-model">Narrator · concept cards</label><input id="narrator-model" bind:value={narratorModel} oninput={() => { settingsSaved = ''; modelTestResult = null; }} />
+     <div class="settings-actions"><button type="button" class="secondary" disabled={!!busy} onclick={() => void saveModels()}>Save models</button><button type="button" class="secondary" disabled={!!busy || setup.status === 'none'} onclick={() => void testModels()}>Test models</button><button type="button" class="text-button" disabled={!!busy} onclick={restoreDefaultModels}>Restore defaults</button></div>
+     {#if settingsSaved === 'models'}<p class="save-confirmation" role="status">Model choices saved.</p>{/if}
+     {#if modelTestResult}<ul class="model-test-results" aria-label="Model test results">{#each Object.entries(modelTestResult.results) as [role, result]}<li class:success={result.ok} class:failure={!result.ok}><strong>{role}:</strong> {result.message}</li>{/each}</ul>{/if}
+   </section>
+   <section><h3>OpenRouter key</h3><p>{setup.masked} {setup.status === 'managed' ? '· Managed by file' : ''}</p>{#if setup.status !== 'managed'}<form onsubmit={event => { event.preventDefault(); void connect(); }}><label for="replace-key">Replace key</label><input id="replace-key" type="password" autocomplete="off" bind:value={key} required /><button type="submit" class="secondary" disabled={!!busy}>Validate & replace</button></form><button type="button" class="subtle-link" onclick={() => void perform('Removing key…', async () => { setup = await api('/api/setup/key', 'DELETE'); settingsDialog?.close(); }, undefined, 'settings')}>Remove key</button>{/if}</section>
   <section><h3>Spend limits</h3><p>Model calls reserve against these limits before running. Today’s budgeted spend is ${spent.toFixed(3)}; usage can settle at a different amount.</p><form onsubmit={event => { event.preventDefault(); void saveLimits(); }}><label for="expansion-cap">Daily expansions</label><input id="expansion-cap" type="number" min="1" max="1000" bind:value={expansionCap} oninput={() => settingsSaved = ''} /><label for="pin-cap">Daily pins</label><input id="pin-cap" type="number" min="1" max="1000" bind:value={pinCap} oninput={() => settingsSaved = ''} /><label for="hourly-limit">Hourly limit ($)</label><input id="hourly-limit" type="number" min="0.01" max="100" step="0.01" bind:value={hourlyLimit} oninput={() => settingsSaved = ''} /><button type="submit" class="secondary" disabled={!!busy}>Save limits</button></form>{#if settingsSaved === 'limits'}<p class="save-confirmation" role="status">Spend limits saved.</p>{/if}</section>
   <button type="button" class="danger-link" onclick={() => void deleteData()}>Delete all creative data</button>
 </dialog>

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 process.env.DB_PATH = ':memory:';
 
-test('Dreamer → Jev → card uses fixed model calls and records provider cost', async () => {
+test('Dreamer → Jev → card uses selected model calls and records provider cost', async () => {
   const { dream } = await import('../src/pipeline/dream.js');
   const { filter } = await import('../src/pipeline/filter.js');
   const { narrate } = await import('../src/pipeline/narrate.js');
@@ -25,9 +25,9 @@ test('Dreamer → Jev → card uses fixed model calls and records provider cost'
     return Response.json({ choices: [{ message: { content: requests.length === 1 ? '1. underground knock\n2. paper heartbeat' : JSON.stringify({ pitch: 'A tactile message', stack: 'ESP32', prototype: 'Blink on a knock', wildcard: 'A printer' }) } }], usage: { cost: .00014 } });
   };
   try {
-    const candidates = await dream('fake-key', 'doorbell', ['doorbell'], [], 'medium', 'fixture-operation');
-    const kept = await filter('fake-key', 'doorbell', 'doorbell', [], candidates, 'medium', 'fixture-operation');
-    const card = await narrate('fake-key', ['doorbell', kept[0].label], [], 'fixture-operation');
+    const candidates = await dream('fake-key', 'doorbell', ['doorbell'], [], 'medium', 'test/dreamer', 'fixture-operation');
+    const kept = await filter('fake-key', 'doorbell', 'doorbell', [], candidates, 'medium', 'test/jev', 'fixture-operation');
+    const card = await narrate('fake-key', ['doorbell', kept[0].label], [], 'test/narrator', 'fixture-operation');
     assert.equal(kept.length, 2);
     assert.deepEqual(card.chain, ['doorbell', kept[0].label]);
     assert.equal(requests.length, 3);
@@ -36,11 +36,13 @@ test('Dreamer → Jev → card uses fixed model calls and records provider cost'
     assert.deepEqual(requests[0].body.provider.order, ['together', 'coreweave/fp8', 'novita/fp8']);
     assert.deepEqual(requests[2].body.provider, requests[0].body.provider);
     assert.match(requests[2].body.messages[1].content, /do not repeat it in the output/i);
-    assert.equal(requests[1].body.model, 'jev-1.13');
+    assert.equal(requests[0].body.model, 'test/dreamer');
+    assert.equal(requests[1].body.model, 'test/jev');
+    assert.equal(requests[2].body.model, 'test/narrator');
     assert.deepEqual(deadlines, [30_000, 30_000, 30_000]);
     assert.equal((db.prepare('SELECT SUM(cost) AS total FROM model_calls').get() as { total: number }).total, .00031);
     const call = db.prepare("SELECT model,latency_ms FROM model_calls WHERE role='dreamer'").get() as { model: string; latency_ms: number };
-    assert.equal(call.model, 'deepseek/deepseek-v4.1-flash');
+    assert.equal(call.model, 'test/dreamer');
     assert.ok(call.latency_ms >= 0);
   } finally { globalThis.fetch = original; AbortSignal.timeout = originalTimeout; }
 });
@@ -74,7 +76,7 @@ test('Narrator retries invalid concept output up to three total calls', async ()
   };
   try {
     const path = ['doorbell', 'paper heartbeat'];
-    const card = await narrate('fake-key', path, [], 'narrator-retry-test');
+    const card = await narrate('fake-key', path, [], 'test/narrator', 'narrator-retry-test');
     assert.equal(requests.length, 3);
     assert.match(requests[1].body.messages[1].content, /previous JSON did not satisfy the required fields/i);
     assert.match(requests[2].body.messages[1].content, /previous JSON did not satisfy the required fields/i);
@@ -92,7 +94,7 @@ test('Narrator reports a clear failure after three invalid concepts', async () =
     return Response.json({ choices: [{ message: { content: '{"pitch":"incomplete"}' } }], usage: { cost: .0001 } });
   };
   try {
-    await assert.rejects(narrate('fake-key', ['doorbell'], [], 'narrator-failed-retry-test'), /valid card after 3 attempts/);
+    await assert.rejects(narrate('fake-key', ['doorbell'], [], 'test/narrator', 'narrator-failed-retry-test'), /valid card after 3 attempts/);
     assert.equal(calls, 3);
   } finally { globalThis.fetch = original; }
 });
